@@ -4,10 +4,6 @@ import numpy as np
 import logging
 import glob
 import os
-import src.SAT_function_Obs_EC as data_process
-# from src.plot_func import plot_data_polar
-# import importlib
-# # importlib.reload(src.plot_func)
 # %%
 output_dir = "/work/mh0033/m301036/Atlantic_heat_capacitor_Arctic/Atlantic_capacitor_on_Arctic/docs/data/Spatial_pattern"
 # %%
