@@ -32,35 +32,75 @@ for tf_name, ds in zip(time_frames, ds_map):
 combined = xr.concat(per_tf, dim="time_frame")
 combined.name = "beta_diff" 
 # %%
-# input the agreement masks for the differences
-agreement_masks_dir = "significance_masks/"
-agreement_masks_ds = xr.open_mfdataset(output_dir + agreement_masks_dir + 'Beta_pattern_mean_long_vs_present_differences_Among_LEs_agreementMasks.nc')
-agreement_masks_ds_vsMT = xr.open_mfdataset(output_dir + agreement_masks_dir + 'Beta_pattern_mean_mid_vs_present_differences_Among_LEs_agreementMasks.nc')  
-agreement_masks_ds_LTvsMT = xr.open_mfdataset(output_dir + agreement_masks_dir + 'Beta_pattern_mean_long_vs_mid_differences_Among_LEs_agreementMasks.nc')
+# FDR significance for the member-wise contrast plotted in each column.
+# A multi-model cell is hatched when at least 3 of the 4 large ensembles
+# independently pass BH-FDR q <= 0.05 for that contrast.
+uncertainty_dir = (
+    "/work/mh0033/m301036/Atlantic_heat_capacitor_Arctic/"
+    "Atlantic_capacitor_on_Arctic/scripts/SpatialPattern/"
+    "data_35yr_segments/output/uncertainty_statistics_vs_HIST/"
+)
+FDR_REQUIRED_MODELS = 3
+FDR_CONTRAST_BY_TIMEFRAME = {
+    "MT_vs_Present": "mid_minus_hist",
+    "LT_vs_Present": "late_minus_hist",
+    "LT_vs_MT": "late_minus_mid",
+}
+
+def load_fdr_significant(time_frame, scenario):
+    """Return cells FDR-significant in at least 3 of the 4 LEs."""
+    contrast = FDR_CONTRAST_BY_TIMEFRAME[time_frame]
+    masks = []
+    for model in LENS_name:
+        stats_path = (
+            f"{uncertainty_dir}{model}_{scenario}_{contrast}_LE_stats.nc"
+        )
+        if not os.path.exists(stats_path):
+            raise FileNotFoundError(
+                f"Missing FDR statistics for {model}, {scenario}, "
+                f"{time_frame}: {stats_path}"
+            )
+        with xr.open_dataset(stats_path) as ds:
+            if "significant_fdr" not in ds:
+                raise KeyError(f"'significant_fdr' missing from {stats_path}")
+            mask = ds["significant_fdr"].load().fillna(0).astype(bool)
+        masks.append(mask.expand_dims(model=[model]))
+
+    stacked = xr.concat(masks, dim="model", join="exact")
+    significant = stacked.sum("model") >= FDR_REQUIRED_MODELS
+    significant.name = "significant_fdr_3_of_4_models"
+    significant.attrs.update(
+        contrast=contrast,
+        criterion=(
+            "At least 3 of 4 large ensembles have BH-FDR q <= 0.05 "
+            "for the member-wise contrast"
+        ),
+    )
+    return significant
+
+fdr_by_time_frame = []
+for time_frame in time_frames:
+    by_scenario = xr.concat(
+        [load_fdr_significant(time_frame, scenario) for scenario in scenarios],
+        dim=xr.IndexVariable("scenario", scenarios),
+        join="exact",
+    )
+    fdr_by_time_frame.append(
+        by_scenario.expand_dims(time_frame=[time_frame])
+    )
+
+fdr_significant = xr.concat(
+    fdr_by_time_frame,
+    dim="time_frame",
+    join="exact",
+).assign_coords(time_frame=time_frames)
 # %%
-agreement_masks = []
-
-for time_frame, ds in zip(["LT_vs_Present", "MT_vs_Present", "LT_vs_MT"], [agreement_masks_ds, agreement_masks_ds_vsMT, agreement_masks_ds_LTvsMT]):
-    # collect DataArrays for the scenarios in the desired order
-    arrs = [ds[scen] for scen in scenarios]            # list of DataArray (lat,lon,...)
-    # concat them into a single DataArray with a new 'scenario' dim
-    stacked = xr.concat(arrs, dim="scenario")
-    stacked = stacked.assign_coords({"scenario": np.array(scenarios, dtype=object)})
-    # add a time_frame dimension so we can concat across time_frames later
-    stacked = stacked.expand_dims({"time_frame": [time_frame]})
-
-    agreement_masks.append(stacked)
-
-# final combined DataArray: dims ('time_frame','scenario', 'lat','lon', ...)
-agreement_masks = xr.concat(agreement_masks, dim="time_frame")
-agreement_masks.name = "agreement_mask"   # optional    
 # %%
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.colors import BoundaryNorm
 import cartopy.util as cutil
 import seaborn as sns
 import matplotlib.colors as mcolors
-import palettable
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 
@@ -119,13 +159,57 @@ def prepare_lsm_on_grid(ref2d):
         lsm = to_0360(lsm)
 
     lsm = lsm.interp_like(ref2d)
-    ocean_mask_2d = (lsm == 0)
+    ocean_mask_2d = (lsm == 0).squeeze(drop=True)
     return ocean_mask_2d
+
+def _draw_hatch(ax, lon2d, lat2d, min_lat, hatch_mask, ocean_mask, hatch_pattern, hatch_color, zorder):
+    hm = np.asarray(hatch_mask)
+    if isinstance(hm, np.ma.MaskedArray):
+        hm = hm.filled(False)
+    hm = np.squeeze(hm).astype(bool)
+
+    if hm.shape != lat2d.shape:
+        if hm.T.shape == lat2d.shape:
+            hm = hm.T
+        else:
+            raise ValueError(f"hatch mask shape {hm.shape} does not match map shape {lat2d.shape}")
+
+    if ocean_mask is not None:
+        om = np.asarray(ocean_mask)
+        if isinstance(om, np.ma.MaskedArray):
+            om = om.filled(False)
+        om = np.squeeze(om).astype(bool)
+
+        if om.shape != lat2d.shape:
+            if om.T.shape == lat2d.shape:
+                om = om.T
+            else:
+                raise ValueError(f"ocean mask shape {om.shape} does not match map shape {lat2d.shape}")
+    else:
+        om = np.ones_like(hm, dtype=bool)
+
+    hatch_field = np.where((lat2d >= min_lat) & hm & om, 1.0, np.nan)
+
+    n0 = len(ax.collections)
+    ax.contourf(
+        lon2d, lat2d, hatch_field,
+        levels=[0.5, 1.5],
+        hatches=[hatch_pattern],
+        colors="none",
+        transform=ccrs.PlateCarree(),
+        zorder=zorder
+    )
+
+    new_cols = ax.collections[n0:]
+    for coll in new_cols:
+        coll.set_facecolor("none")
+        coll.set_edgecolor(hatch_color)
+        coll.set_linewidth(0.0)   # removes polygon borders, keeps hatch strokes
 
 def plot_data_polar(
     data, lats, lons, ax, levels, cmap, extend="both", title="",
     show_xticks=True, show_yticks=True, label_longitude=False,
-    min_lat=66.5, hatch_mask=None, hatch_pattern="//",
+    min_lat=66.5, hatch_mask=None, hatch_pattern="///",
     hatch_color="magenta", ocean_mask=None
 ):
     lon2d, lat2d = np.meshgrid(lons, lats)
@@ -159,183 +243,162 @@ def plot_data_polar(
             )
 
     if hatch_mask is not None:
-        hm = np.asarray(hatch_mask)
-        if isinstance(hm, np.ma.MaskedArray):
-            hm = hm.filled(False)
-        hm = np.squeeze(hm).astype(bool)
-
-        if hm.shape != lat2d.shape:
-            if hm.T.shape == lat2d.shape:
-                hm = hm.T
-            else:
-                raise ValueError(f"hatch mask shape {hm.shape} does not match map shape {lat2d.shape}")
-
-        if ocean_mask is not None:
-            om = np.asarray(ocean_mask)
-            if isinstance(om, np.ma.MaskedArray):
-                om = om.filled(False)
-            om = np.squeeze(om).astype(bool)
-
-            if om.shape != lat2d.shape:
-                if om.T.shape == lat2d.shape:
-                    om = om.T
-                else:
-                    raise ValueError(f"ocean mask shape {om.shape} does not match map shape {lat2d.shape}")
-        else:
-            om = np.ones_like(hm, dtype=bool)
-
-        hatch_field = np.where((lat2d >= min_lat) & hm & om, 1.0, np.nan)
-
-        n0 = len(ax.collections)
-        ax.contourf(
-            lon2d, lat2d, hatch_field,
-            levels=[0.5, 1.5],
-            hatches=[hatch_pattern],
-            colors="none",
-            transform=ccrs.PlateCarree(),
-            zorder=3
+        _draw_hatch(
+            ax, lon2d, lat2d, min_lat, hatch_mask, ocean_mask,
+            hatch_pattern, hatch_color, zorder=3
         )
-
-        new_cols = ax.collections[n0:]
-        for coll in new_cols:
-            coll.set_facecolor("none")
-            coll.set_edgecolor(hatch_color)
-            coll.set_linewidth(0.0)   # removes polygon borders, keeps hatch strokes
 
     ax.set_title(title, fontsize=10, pad=3)
     return cf
 # %%
 import seaborn as sns
 sns.set_style("white")
-sns.set_context("notebook", font_scale=1.5, rc={"lines.linewidth": 2.5})
+sns.set_context("notebook", font_scale=1.0)
 
-# Create a figure with 2x3 grid (scenarios × time comparisons)
+# Two scenarios by three matching member-wise contrasts.
 n_rows, n_cols = 2, 3
 fig, axes = plt.subplots(
     n_rows, n_cols,
-    figsize=(20, 15),  # Increased size for better display
-    subplot_kw={'projection': ccrs.NorthPolarStereo()},
-    constrained_layout=False  # Disable to avoid clipping issues
+    figsize=(15, 10),
+    subplot_kw={"projection": ccrs.NorthPolarStereo()},
+    constrained_layout=False,
 )
 intervals = np.arange(-2.5, 2.75, 0.25)
-# Manually adjust spacing
-fig.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.15, wspace=0.15, hspace=0.15)
+fig.subplots_adjust(
+    left=0.10, right=0.90, top=0.94, bottom=0.20,
+    wspace=0.06, hspace=0.08,
+)
 
-# --- Rows represent scenarios, Columns represent time comparisons ---
-# Columns: MT_vs_Present, LT_vs_Present, LT_vs_MT
 tf_order = ["MT_vs_Present", "LT_vs_Present", "LT_vs_MT"]
-
-# Column titles with arrows
-col_titles = ["CO₂↑", "CO₂↓", "CO₂↓ minus CO₂↑"]
-
-# Panel letters
-titles_left = ['a', 'b', 'c', 'd', 'e', 'f']
-# Scenario labels for rows
+# Shorter, cleaner titles
+col_titles = [
+    r"$\mathbf{CO_{2}}$$\uparrow$ $-$ Hist.",
+    r"$\mathbf{CO_{2}}$$\downarrow$ $-$ Hist.",
+    r"$\mathbf{CO_{2}}$$\downarrow$ $-$ $\mathbf{CO_{2}}$$\uparrow$",
+]
+panel_labels = ["a", "b", "c", "d", "e", "f"]
 scenario_labels = ["SSP1-1.9", "SSP1-2.6"]
 
-# Time frame descriptions (for reference)
-time_descriptions = ["(2015-2049)\nvs.\n(1980-2014)",
-                     "(2065-2099)\nvs.\n(1980-2014)",
-                     "(2065-2099)\nvs.\n(2015-2049)"]
+reference = to_0360(
+    combined.sel(time_frame=tf_order[0], scenario=scenarios[0]).squeeze()
+).transpose("lat", "lon")
+ocean_mask_2d = prepare_lsm_on_grid(reference).transpose("lat", "lon")
 
-# Store contour objects for colorbar
 contour_objects = []
-
-for row in range(n_rows):
-    for col in range(n_cols):
-        idx = row * n_cols + col
+for row, scenario in enumerate(scenarios):
+    for col, time_frame in enumerate(tf_order):
         ax = axes[row, col]
-        
-        scenario = scenarios[row]
-        tf = tf_order[col]
-        
-        print(f"Plotting panel {scenario} - {tf} at row {row}, column {col}")
+        print(f"Plotting panel {scenario} - {time_frame}")
 
-        # Row label (scenario) on the left side
-        if col == 0:
-            ax.text(
-                -0.18, 0.5, scenario_labels[row],
-                transform=ax.transAxes,
-                rotation=90,
-                fontsize=24, fontweight="bold",
-                ha="center", va="center"
+        beta = to_0360(
+            combined.sel(time_frame=time_frame, scenario=scenario).squeeze()
+        ).transpose("lat", "lon")
+        fdr_mask = to_0360(
+            fdr_significant.sel(
+                time_frame=time_frame, scenario=scenario
+            ).squeeze()
+        ).transpose("lat", "lon")
+
+        try:
+            beta, fdr_mask, ocean_mask = xr.align(
+                beta, fdr_mask, ocean_mask_2d, join="exact"
             )
-        # Column title (time comparison) on the top
-        if row == 0:
-            ax.text(
-                0.5, 1.1, col_titles[col],
-                transform=ax.transAxes,
-                fontsize=24, fontweight="bold",
-                ha="center", va="bottom"
-            )
-       
-        # select DataArray from combined_mask
-        beta = combined.sel(time_frame=tf, scenario=scenario).squeeze()
+        except ValueError as exc:
+            raise ValueError(
+                f"Grid mismatch for {scenario}, {time_frame}; the plotted "
+                "field, FDR mask, and ocean mask must share lat/lon coordinates."
+            ) from exc
 
-        # make sure the data is (lat, lon) with lon last:
-        if beta.dims[-1] != "lon":
-            beta = beta.transpose(..., "lat", "lon") if "lat" in beta.dims and "lon" in beta.dims else beta
-
-        # 4) NOW add the cyclic point safely (lon length must match data.shape[-1])
-        data_cyclic, lon_cyclic = cutil.add_cyclic_point(
-            beta.values, coord=beta["lon"].values, axis=-1
+        fdr_mask = fdr_mask.fillna(False).astype(bool).where(ocean_mask, False)
+        print(
+            "  3-of-4-model FDR-significant ocean cells: "
+            f"{int(fdr_mask.sum())}"
         )
 
-        # agreement mask should go through the same steps
-        amask = agreement_masks.sel(time_frame=tf, scenario=scenario).squeeze()
-
-        if amask.dims[-1] != "lon":
-            amask = amask.transpose(..., "lat", "lon")
-
-        mask_cyclic, lon_mask_cyclic = cutil.add_cyclic_point(
-            amask.values.astype(bool), coord=amask["lon"].values, axis=-1
+        data_cyclic, lon_cyclic = cutil.add_cyclic_point(
+            beta.values, coord=beta.lon.values, axis=-1
+        )
+        fdr_cyclic, _ = cutil.add_cyclic_point(
+            fdr_mask.values.astype(bool), coord=fdr_mask.lon.values, axis=-1
+        )
+        ocean_cyclic, _ = cutil.add_cyclic_point(
+            ocean_mask.values.astype(bool), coord=ocean_mask.lon.values, axis=-1
         )
 
         contour_obj = plot_data_polar(
-            data_cyclic, beta["lat"].values, lon_cyclic,
-            levels=intervals, extend="both", cmap=aru_cmap_div, title="",
-            ax=ax, label_longitude=True, min_lat=66.5,
-            hatch_mask=~mask_cyclic, hatch_pattern="//"
+            data_cyclic,
+            beta.lat.values,
+            lon_cyclic,
+            levels=intervals,
+            extend="both",
+            cmap=aru_cmap_div,
+            ax=ax,
+            min_lat=66.5,
+            hatch_mask=fdr_cyclic,
+            hatch_pattern="//",
+            hatch_color="Azure",
+            ocean_mask=ocean_cyclic,
         )
-        
-        # Store the contour object
         contour_objects.append(contour_obj)
-        
-        # Add grey land shading on top of the data
-        ax.add_feature(cfeature.LAND, facecolor='lightgrey', edgecolor='none', zorder=3)
-        
-        # Add longitude labels around the plot
-        for lon in [0, 60, 120, 180, 240, 300]:
-            ax.text(lon, 65.0, f"{lon}°",  # Adjusted latitude closer to min_lat=66.5
-                    transform=ccrs.PlateCarree(),
-                    ha='center', va='top', fontsize=14, color='black',
-                    bbox=dict(boxstyle='round,pad=0.03', facecolor='none', 
-                             edgecolor='none', alpha=0.7))
+        ax.add_feature(
+            cfeature.LAND, facecolor="lightgrey", edgecolor="none", zorder=3.5
+        )
 
-# add colorbar below the plot (use first contour object, all have same levels)
-cbar_ax = fig.add_axes([0.2, 0.1, 0.6, 0.02])
+        if row == 0:
+            ax.set_title(col_titles[col], fontsize=18, pad=10, fontweight="bold")
+        if col == 0:
+            ax.text(
+                -0.18, 0.5, scenario_labels[row], transform=ax.transAxes,
+                rotation=90, fontsize=18, fontweight="bold",
+                ha="center", va="center",
+            )
+        ax.text(
+            -0.05, 1.02, panel_labels[row * n_cols + col],
+            transform=ax.transAxes, fontsize=24, fontweight="bold",
+            ha="center", va="center",
+        )
+# -------------------------------------------------------------
+# Colorbar
+# -------------------------------------------------------------
+cbar_ax = fig.add_axes([0.20, 0.165, 0.60, 0.018])
 cbar = fig.colorbar(
-    contour_objects[0],  # Use first contour object
+    contour_objects[0],
     cax=cbar_ax,
     orientation="horizontal",
-    extend="both"
+    extend="both",
 )
-cbar.ax.tick_params(labelsize=20)
-# set the interval for the labels on the colorbar
-cbar.set_ticks(intervals[::2])  # Show every other tick to avoid crowding
-cbar.set_label("Warming pattern scaling difference"+" ("+r'$\beta$'+":°C/°C)", fontsize=22)
-# add the bold a, b, c, d, e, f labels to the top left of each panel
-for idx, ax in enumerate(axes.flat):
-    ax.text(
-        -0.05, 1.05, titles_left[idx],
-        transform=ax.transAxes,
-        fontsize=28, fontweight="bold",
-        ha="center", va="bottom")
-    
-dir_fig_out = "/work/mh0033/m301036/Atlantic_heat_capacitor_Arctic/Atlantic_capacitor_on_Arctic/docs/figs/Spatial_pattern"
 
-plt.savefig(f"{dir_fig_out}/Fig2_pattern_scaling_differences.png", dpi=300, bbox_inches='tight')
-plt.savefig(f"{dir_fig_out}/Fig2_pattern_scaling_differences.pdf", format='pdf', dpi=300, bbox_inches='tight')
+tick_locs = np.arange(-2.5, 2.6, 0.5)
+cbar.set_ticks(tick_locs)
+cbar.ax.tick_params(labelsize=13, length=7, width=1.4, color="0.2")
+cbar.ax.set_xticklabels([f"{x:.1f}" for x in tick_locs], fontsize=13)
+cbar.ax.spines["outline"].set_linewidth(1.2)
+cbar.ax.minorticks_off()
+cbar.set_label(r"Warming pattern scaling difference (°C/°C)", fontsize=16)
 
+# -------------------------------------------------------------
+# Optional significance explanation
+# -------------------------------------------------------------
+# fig.text(
+#     0.50,
+#     0.08,
+#     r"Hatching: member-wise contrast is BH-FDR significant "
+#     r"in at least 3 of 4 large ensembles (q ≤ 0.05; cells ≥66.5°N)",
+#     ha="center", va="center", fontsize=14,
+# )
+
+dir_fig_out = (
+    "/work/mh0033/m301036/Atlantic_heat_capacitor_Arctic/"
+    "Atlantic_capacitor_on_Arctic/docs/figs/Spatial_pattern"
+)
+os.makedirs(dir_fig_out, exist_ok=True)
+plt.savefig(
+    f"{dir_fig_out}/Fig2_pattern_scaling_differences.png",
+    dpi=300, bbox_inches="tight",
+)
+plt.savefig(
+    f"{dir_fig_out}/Fig2_pattern_scaling_differences.pdf",
+    format="pdf", dpi=300, bbox_inches="tight",
+)
 plt.show()
 # %%

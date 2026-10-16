@@ -81,6 +81,9 @@ OVT_GATEWAYS = ['bering_strait',  'davis_strait', 'fram_strait', 'barents_openin
 
 GATEWAY_FOR_PANEL_B = "total"
 GATEWAY_FOR_PANEL_C = "total"
+
+LEGEND_FONT_SIZE = 17
+LEGEND_TITLE_FONT_SIZE = 16
 # %%
 # ============================================================
 # ---------------------- HELPERS ------------------------------
@@ -141,7 +144,7 @@ def add_panel_label(ax, label):
         -0.05, 1.1, label,
         transform=ax.transAxes,
         ha="left", va="top",
-        fontsize=18, fontweight="bold"
+        fontsize=24, fontweight="bold"
     )
 
 def transform_depth_axis(ax, upper_limit=700, lower_limit=4500):
@@ -240,33 +243,6 @@ def load_heat_budget_component(var_name):
 
     return out
 
-# def load_ohs_timeseries():
-#     out = {}
-#     dir_ohs = "/work/mh0033/m301036/Atlantic_heat_capacitor_Arctic/Atlantic_capacitor_on_Arctic/docs/data/Heat_budget/Heat_content_Arctic_full_depth/MPI-ESM1-2-LR"
-
-#     for scen in SCENARIOS:
-#         member_das = []
-
-#         for mem in MEMBERS:
-#             fn = f"{dir_ohs}/{scen}/{MODEL}_{scen}_{mem}_OHS_Arctic_TW_anom_timeseries.nc"
-#             if not os.path.exists(fn):
-#                 continue
-#             try:
-#                 ds = xr.open_dataset(fn, decode_times=True)
-#                 da = choose_var(ds, ["OHS_Arctic_TW_anom", "OHS"]).squeeze(drop=True)
-#                 da = annualize_da(da)
-#                 da = reduce_extra_dims(da, keep_dims=("time",))
-#                 da = clean_for_concat(da)
-#                 da = da.expand_dims(member=[mem])
-#                 member_das.append(da)
-#             except Exception as e:
-#                 print(f"[warn] failed OHS file {fn}: {e}")
-
-#         if member_das:
-#             out[scen] = xr.concat(member_das, dim="member", coords="minimal", compat="override", join="override")
-#             print(f"[load] OHS {scen}: {out[scen].sizes['member']} members")
-
-#     return out
 def load_ohs_timeseries():
     out = {}
     # dir_ohs = "/work/mh0033/m301036/Atlantic_heat_capacitor_Arctic/Atlantic_capacitor_on_Arctic/docs/data/Heat_budget/Heat_content_Arctic_full_depth/MPI-ESM1-2-LR"
@@ -333,30 +309,30 @@ def load_oht_timeseries_total():
                         da = da.squeeze(d, drop=True)
 
                 da = annualize_da(da)
+
+                if "month" in da.dims:
+                    raise ValueError(
+                        f"{scen} {period}: unexpected month dimension "
+                        f"{da.sizes['month']}"
+                    )
+
+                if "time" not in da.dims:
+                    raise ValueError(f"{scen} {period}: missing time dimension")
+
+                years = np.asarray(da.time.dt.year.values)
+                expected = np.arange(expected_years[0], expected_years[1] + 1)
+                if not np.array_equal(years, expected):
+                    raise ValueError(
+                        f"{scen} {period}: invalid time axis; "
+                        f"found {years[0]}-{years[-1]}, "
+                        f"expected {expected[0]}-{expected[-1]}"
+                    )
+
                 da = reduce_extra_dims(da, keep_dims=("member", "time"))
-                
-                # FIX TIME COORDINATES if they're wrong (SSP126 2065-2099 has wrong times!)
-                if 'time' in da.dims:
-                    actual_start_year = pd.to_datetime(da.time.values[0]).year
-                    expected_start_year = expected_years[0]
-                    
-                    if actual_start_year != expected_start_year:
-                        print(f"  [warn] {scen} {period}: TIME MISMATCH! File has {actual_start_year}, expected {expected_start_year}")
-                        print(f"    Correcting time coordinates to {expected_years[0]}-{expected_years[1]}...")
-                        
-                        # Create correct time coordinates
-                        n_years = len(da.time)
-                        new_times = pd.date_range(
-                            start=f"{expected_years[0]}-01-01",
-                            periods=n_years,
-                            freq='YS'
-                        )
-                        da = da.assign_coords(time=new_times)
-                
                 da = clean_for_concat(da)
                 das.append(da)
             except Exception as e:
-                print(f"[warn] failed OHT total file {fn}: {e}")
+                raise RuntimeError(f"Failed OHT total file {fn}: {e}") from e
 
         if das:
             out[scen] = xr.concat(das, dim="time", coords="minimal", compat="override", join="override").sortby("time")
@@ -387,9 +363,7 @@ def load_qice_timeseries():
             print(f"[warn] failed to load Qice {scen}: {e}")
     return out
 # %%
-# ============================================================
-# ------------------- LOAD PROFILE DATA -----------------------
-# ============================================================
+
 def load_oht_profiles_with_members(gateway="total"):
     """Load OHT profiles with all members for proper ensemble statistics."""
     dir_in = "/work/mh0033/m301036/Atlantic_heat_capacitor_Arctic/Atlantic_capacitor_on_Arctic/docs/data/Heat_budget/OHT/output"
@@ -546,9 +520,6 @@ def load_thetao_profiles():
 
     return out
 # %%
-# ============================================================
-# -------------------- PLOTTING HELPERS ----------------------
-# ============================================================
 def plot_panel_a(ax, oht_total, ohs, nshf, qflux=None):
     """
     Panel a: Arctic Ocean heat-budget component time series.
@@ -562,7 +533,7 @@ def plot_panel_a(ax, oht_total, ohs, nshf, qflux=None):
     # ------------------------------------------------------------
     component_colors = {
         "OHT":   "#A32A31", #"#AA0A2E",
-        "OHS":   "#F4683F",
+        "OHC tendency":   "#F4683F",
         "Q$_{surf}$":   "#407BD0", # "#575AA7"
         "Q$_{ice}$": "#6B92C5",
     }
@@ -584,7 +555,7 @@ def plot_panel_a(ax, oht_total, ohs, nshf, qflux=None):
 
     components = {
         "OHT":   oht_total,
-        "OHS":   ohs,
+        "OHC tendency":   ohs,
         "Q$_{surf}$":   nshf,
         "Q$_{ice}$": qflux if qflux is not None else {},
     }
@@ -675,15 +646,16 @@ def plot_panel_a(ax, oht_total, ohs, nshf, qflux=None):
     ax.axhline(0, color="gray", linestyle="--", linewidth=1.0)
     ax.set_xlim(1980, 2100)
     # make the axis tick label font size larger
-    ax.tick_params(axis='both', which='major', labelsize=12)
+    ax.tick_params(axis='both', which='major', labelsize=18)
 
     if y_values:
         y_max = max(abs(np.nanmin(y_values)), abs(np.nanmax(y_values)))
         ax.set_ylim(-y_max, y_max)
 
-    ax.set_ylabel("Heat-budget anomaly (TW)", fontsize=12)
-    ax.set_xlabel("Year", fontsize=12)
-    ax.set_title("Arctic Ocean Heat Budget Components", fontsize=14)
+    ax.set_ylabel("Heat-budget anomaly (TW)", fontsize=16)
+    ax.set_xlabel("Year", fontsize=16)
+    ax.tick_params(axis='both', which='major', labelsize=16)
+    ax.set_title("Arctic Ocean Heat Budget Components", fontsize=18)
 
     # ------------------------------------------------------------
     # Legends
@@ -717,7 +689,10 @@ def plot_panel_a(ax, oht_total, ohs, nshf, qflux=None):
         loc="upper left",
         bbox_to_anchor=(1.02, 1.0),
         frameon=False,
-        fontsize=9,
+        fontsize=LEGEND_FONT_SIZE,
+        title_fontsize=LEGEND_TITLE_FONT_SIZE,
+        labelspacing=0.55,
+        handlelength=2.2,
     )
     ax.add_artist(leg1)
 
@@ -725,9 +700,12 @@ def plot_panel_a(ax, oht_total, ohs, nshf, qflux=None):
         handles=scenario_handles,
         title="Scenario",
         loc="upper left",
-        bbox_to_anchor=(1.02, 0.65),
+        bbox_to_anchor=(1.02, 0.5),
         frameon=False,
-        fontsize=9,
+        fontsize=LEGEND_FONT_SIZE,
+        title_fontsize=LEGEND_TITLE_FONT_SIZE,
+        labelspacing=0.55,
+        handlelength=2.2,
     )
 
     # ------------------------------------------------------------
@@ -747,170 +725,20 @@ def plot_panel_a(ax, oht_total, ohs, nshf, qflux=None):
         )
 
     ax.text(
-        1997.5, y_pos, "Present-day",
+        1997.5, y_pos, "Historical",
         ha="center", va="bottom",
-        fontsize=10, style="italic", color="black",
+        fontsize=14, style="italic", color="black",
     )
     ax.text(
         2032.5, y_pos, "CO$_2$ increase",
         ha="center", va="bottom",
-        fontsize=10, style="italic", color="black",
+        fontsize=14, style="italic", color="black",
     )
     ax.text(
-        2082.5, y_pos, "CO$_2$ decreasing",
+        2082.5, y_pos, "CO$_2$ decrease",
         ha="center", va="bottom",
-        fontsize=10, style="italic", color="black",
+        fontsize=14, style="italic", color="black",
     )
-# def plot_panel_a(ax, oht_total, ohs, nshf, qflux=None):
-    # Compute OHT + SHF + Qflux: residual should approximate OHS if budget closes.
-    # Uses the intersection of available time coordinates across all three terms.
-    # oht_plus_shf_qflux = {}
-    # for scen in SCENARIOS:
-    #     terms = {}
-    #     if scen in oht_total:
-    #         terms["oht"] = oht_total[scen]
-    #     if scen in nshf:
-    #         terms["shf"] = nshf[scen]
-    #     if qflux is not None and scen in qflux:
-    #         terms["qflux"] = qflux[scen]
-
-    #     if "oht" not in terms:
-    #         continue
-
-    #     # Align on common times across all available terms
-    #     common_times = terms["oht"].time.values
-    #     for v in list(terms.values())[1:]:
-    #         common_times = np.intersect1d(common_times, v.time.values)
-
-    #     if len(common_times) > 0:
-    #         result = terms["oht"].sel(time=common_times)
-    #         if "shf" in terms:
-    #             result = result + terms["shf"].sel(time=common_times)
-    #         if "qflux" in terms:
-    #             result = result + terms["qflux"].sel(time=common_times)
-    #         oht_plus_shf_qflux[scen] = result
-
-    # components = {
-    #     "OHT":             (oht_total,             "-"),
-    #     "OHS":             (ohs,                   (0, (5, 1))),
-    #     "SHF":             (nshf,                  (0, (1, 1))),
-    #     "Qflux":           (qflux if qflux else {}, (0, (3, 1, 1, 1))),
-    #     "OHT+SHF+Qflux":  (oht_plus_shf_qflux,    (0, (5, 1, 1, 1, 1, 1))),
-    # }
-
-    # y_values = []
-    # for comp_name, (comp_dict, linestyle) in components.items():
-    #     for scen in SCENARIOS:
-    #         if scen not in comp_dict:
-    #             continue
-
-    #         da = comp_dict[scen]
-    #         if "member" in da.dims:
-    #             mean_da = da.mean("member")
-    #             std_da = da.std("member")
-    #         else:
-    #             mean_da = da
-    #             std_da = None
-
-    #         # cftime-safe fractional year (handles both datetime64 and cftime objects)
-    #         time_vals = mean_da["time"].values
-    #         try:
-    #             t = pd.to_datetime(time_vals)
-    #             x = t.year + (t.month - 0.5) / 12.0
-    #         except (TypeError, ValueError):
-    #             x = np.array([tt.year + (tt.month - 0.5) / 12.0 for tt in time_vals])
-    #         y = np.asarray(mean_da).squeeze()
-
-    #         # Insert NaN values for 2050-2064 to create visible gaps
-    #         # This prevents matplotlib from drawing lines between 2049-2065
-    #         y_masked = y.copy()
-    #         mask_hide = (x > 2049) & (x < 2065)  # Hide 2050-2064
-    #         y_masked[mask_hide] = np.nan
-            
-    #         # Plot the full array - NaN creates gaps, xlim controls display range
-    #         ax.plot(
-    #             x, y_masked,
-    #             color=SCENARIO_COLORS[scen],
-    #             linestyle=linestyle,
-    #             linewidth=3.5,
-    #             alpha=0.95
-    #         )
-
-    #         if std_da is not None:
-    #             ystd = np.asarray(std_da).squeeze()
-    #             ystd_masked = ystd.copy()
-    #             ystd_masked[mask_hide] = np.nan
-                
-    #             ax.fill_between(
-    #                 x, y_masked - ystd_masked, y_masked + ystd_masked,
-    #                 color=SCENARIO_COLORS[scen],
-    #                 alpha=0.15, linewidth=0
-    #             )
-    #             # Calculate y_values only from non-NaN, non-hidden data
-    #             valid_mask = ~np.isnan(y_masked) & (x >= 1980) & (x <= 2100)
-    #             if valid_mask.any():
-    #                 valid_vals = y_masked[valid_mask]
-    #                 valid_std = ystd_masked[valid_mask]
-    #                 y_values.extend([valid_vals.max(), valid_vals.min(), 
-    #                                (valid_vals + valid_std).max(), (valid_vals - valid_std).min()])
-    #         else:
-    #             # Calculate y_values only from non-NaN data
-    #             valid_mask = ~np.isnan(y_masked) & (x >= 1980) & (x <= 2100)
-    #             if valid_mask.any():
-    #                 y_values.extend([y_masked[valid_mask].max(), y_masked[valid_mask].min()])
-
-    # ax.axhline(0, color="gray", linestyle="--", linewidth=1.0)
-    # ax.set_xlim(1980, 2100)
-    
-    # # Set symmetric y-axis range
-    # if y_values:
-    #     y_max = max(abs(min(y_values)), abs(max(y_values)))
-    #     ax.set_ylim(-y_max, y_max)
-    
-    # ax.set_ylabel("Heat budget term (TW)")
-    # ax.set_xlabel("Year")
-    # ax.set_title("Arctic Ocean Heat Budget Components", fontsize=14)
-
-    # scenario_handles = [
-    #     Line2D([0], [0], color=SCENARIO_COLORS[s], lw=2.0, linestyle="-", label=s)
-    #     for s in ["historical", "ssp119", "ssp126"]
-    # ]
-    # component_handles = [
-    #     Line2D([0], [0], color="black", lw=2.0, linestyle=ls, label=name)
-    #     for name, (_, ls) in components.items()
-    # ]
-
-    # # Place legends outside the plot area, stacked vertically, without frames
-    # leg1 = ax.legend(
-    #     handles=scenario_handles, title="Scenario",
-    #     loc="upper left", bbox_to_anchor=(1.02, 1.0),
-    #     frameon=False, fontsize=9
-    # )
-    # ax.add_artist(leg1)
-    # ax.legend(
-    #     handles=component_handles, title="Component",
-    #     loc="upper left", bbox_to_anchor=(1.02, 0.65),
-    #     frameon=False, fontsize=9
-    # )
-    
-    # # Add phase annotations above x-axis
-    # ylim = ax.get_ylim()
-    # y_pos = ylim[0] + 0.08 * (ylim[1] - ylim[0])  # Position just above bottom
-    
-    # # Phase boundaries
-    # phase_transitions = [2015, 2049]
-    
-    # # Add vertical lines to mark phase transitions
-    # for year in phase_transitions:
-    #     ax.axvline(year, color='gray', linestyle=':', linewidth=1.5, alpha=0.6, zorder=1)
-    
-    # # Add phase labels
-    # ax.text(1997.5, y_pos, 'Present-day', ha='center', va='bottom', 
-    #         fontsize=10, fontweight='normal', style='italic', color='black')
-    # ax.text(2032.5, y_pos, 'CO$_2$ increase', ha='center', va='bottom',
-    #         fontsize=10, fontweight='normal', style='italic', color='black')
-    # ax.text(2082.5, y_pos, 'CO$_2$ decreasing', ha='center', va='bottom',
-    #         fontsize=10, fontweight='normal', style='italic', color='black')
 
 def plot_oht_profile_panel(ax, ds_gateway_OHT_mem, ds_gateway_OHT_mean, gateway='total'):
     """Plot OHT profile for total gateway with proper styling."""
@@ -979,9 +807,10 @@ def plot_oht_profile_panel(ax, ds_gateway_OHT_mem, ds_gateway_OHT_mean, gateway=
     
     ax.set_xlabel('OHT (TW)', fontsize=16)
     ax.set_ylabel('Depth (m)', fontsize=16)
+    ax.tick_params(axis='both', which='major', labelsize=16)
     ax.grid(False)
     ax.axvline(x=0, color='gray', linestyle='--', linewidth=1.5)
-    ax.text(-0.1, 1.1, 'b', transform=ax.transAxes, fontsize=18, fontweight='bold', va='top', ha='right')
+    ax.text(-0.15, 1.1, 'b', transform=ax.transAxes, fontsize=24, fontweight='bold', va='top', ha='right')
 
 def plot_ovt_profile_panel(ax, ds_gateway_OVT_mem, ds_gateway_OVT_mean, gateway='total'):
     """Plot OVT profile for total gateway with proper styling."""
@@ -1045,9 +874,10 @@ def plot_ovt_profile_panel(ax, ds_gateway_OVT_mem, ds_gateway_OVT_mean, gateway=
     
     ax.set_xlabel('OVT (Sv)', fontsize=16)
     ax.set_ylabel('Depth (m)', fontsize=16)
+    ax.tick_params(axis='both', which='major', labelsize=16)
     ax.grid(False)
     ax.axvline(x=0, color='gray', linestyle='--', linewidth=1.5)
-    ax.text(-0.1, 1.1, 'c', transform=ax.transAxes, fontsize=18, fontweight='bold', va='top', ha='right')
+    ax.text(-0.15, 1.1, 'c', transform=ax.transAxes, fontsize=24, fontweight='bold', va='top', ha='right')
 
 def plot_thetao_profile_panel(ax, profile_dict):
     """Plot temperature profile with updated styling."""
@@ -1080,8 +910,9 @@ def plot_thetao_profile_panel(ax, profile_dict):
     ax.axvline(0, color="gray", linestyle="--", linewidth=1.5)
     ax.set_xlabel("Temperature anomaly (°C)", fontsize=16)
     ax.set_ylabel("Depth (m)", fontsize=16)
+    ax.tick_params(axis='both', which='major', labelsize=16)
     ax.grid(False)
-    ax.text(-0.1, 1.1, 'd', transform=ax.transAxes, fontsize=18, fontweight='bold', va='top', ha='right')
+    ax.text(-0.15, 1.1, 'd', transform=ax.transAxes, fontsize=22, fontweight='bold', va='top', ha='right')
     
     # Move legends outside the panel, similar to panel a
     period_handles = [
@@ -1099,13 +930,21 @@ def plot_thetao_profile_panel(ax, profile_dict):
     leg1 = ax.legend(
         handles=period_handles, title="Period",
         loc="upper left", bbox_to_anchor=(1.02, 1.0),
-        frameon=False, fontsize=8
+        frameon=False,
+        fontsize=LEGEND_FONT_SIZE,
+        title_fontsize=LEGEND_TITLE_FONT_SIZE,
+        labelspacing=0.55,
+        handlelength=2.2,
     )
     ax.add_artist(leg1)
     ax.legend(
         handles=scenario_handles, title="Scenario",
-        loc="upper left", bbox_to_anchor=(1.02, 0.65),
-        frameon=False, fontsize=8
+        loc="upper left", bbox_to_anchor=(1.02, 0.5),
+        frameon=False,
+        fontsize=LEGEND_FONT_SIZE,
+        title_fontsize=LEGEND_TITLE_FONT_SIZE,
+        labelspacing=0.55,
+        handlelength=2.2,
     )
 # %%
 # ============================================================
@@ -1124,13 +963,17 @@ def main():
     thetao_profiles = load_thetao_profiles()
 
     print("\nCreating figure...")
-    fig = plt.figure(figsize=(16, 10.5))
+    fig = plt.figure(figsize=(17, 10.5))
 
     # Outer grid: 2 rows with independent spacing per row
     gs_outer = gridspec.GridSpec(
         2, 1,
-        height_ratios=[1.2, 1.0],
-        hspace=0.3,
+        height_ratios=[1.18, 1.0],
+        hspace=0.22,
+        left=0.065,
+        right=0.84,
+        bottom=0.08,
+        top=0.95,
         figure=fig,
     )
 
@@ -1138,7 +981,7 @@ def main():
     gs_top = gridspec.GridSpecFromSubplotSpec(
         1, 3,
         subplot_spec=gs_outer[0],
-        width_ratios=[1, 3, 1],
+        width_ratios=[0.85, 3.3, 0.85],
         wspace=0.1,
     )
     ax_a = fig.add_subplot(gs_top[0, 1])
@@ -1147,7 +990,7 @@ def main():
     gs_bot = gridspec.GridSpecFromSubplotSpec(
         1, 3,
         subplot_spec=gs_outer[1],
-        wspace=0.40,
+        wspace=0.34,
     )
     ax_b = fig.add_subplot(gs_bot[0, 0])
     ax_c = fig.add_subplot(gs_bot[0, 1])
@@ -1161,7 +1004,6 @@ def main():
     plot_ovt_profile_panel(ax_c, ds_gateway_OVT_mem, ds_gateway_OVT_mean, gateway=GATEWAY_FOR_PANEL_C)
     plot_thetao_profile_panel(ax_d, thetao_profiles)
 
-    fig.subplots_adjust(right=0.95)  # Make room for external legends
 
     out_png = f"{FIG_OUT}/Fig4_merged_heat_budget_profiles_fulldepth.png"
     out_pdf = f"{FIG_OUT}/Fig4_merged_heat_budget_profiles_fulldepth.pdf"
